@@ -1,0 +1,42 @@
+{
+    "name": "egough/laravel-github",
+    "description": "GitHub App connections, repository browsing and pull request search for Laravel.",
+    "type": "library",
+    "license": "MIT",
+    "require": {
+        "php": "^8.4",
+        "ext-openssl": "*",
+        "illuminate/cache": "^13.0",
+        "illuminate/contracts": "^13.0",
+        "illuminate/http": "^13.0",
+        "illuminate/support": "^13.0"
+    },
+    "require-dev": {
+        "illuminate/config": "^13.0",
+        "illuminate/container": "^13.0",
+        "phpunit/phpunit": "^13.0"
+    },
+    "autoload": {
+        "psr-4": {
+            "Egough\\LaravelGitHub\\": "src/"
+        }
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "Egough\\LaravelGitHub\\Tests\\": "tests/"
+        }
+    },
+    "extra": {
+        "laravel": {
+            "providers": [
+                "Egough\\LaravelGitHub\\GitHubServiceProvider"
+            ]
+        }
+    },
+    "scripts": {
+        "test": "phpunit"
+    },
+    "config": {
+        "sort-packages": true
+    }
+}
