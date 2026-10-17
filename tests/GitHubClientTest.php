@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Egough\LaravelGitHub\Tests;
 
+use Egough\LaravelGitHub\Facades\GitHub;
 use Egough\LaravelGitHub\GitHubClient;
 use Egough\LaravelGitHub\GitHubUnavailable;
 use Egough\LaravelGitHub\RepositoryUnavailable;
@@ -50,6 +51,24 @@ final class GitHubClientTest extends TestCase
         Facade::clearResolvedInstances();
         Facade::setFacadeApplication(null);
         parent::tearDown();
+    }
+
+    public function test_facade_browses_repositories_and_pull_requests_through_the_bound_client(): void
+    {
+        $this->configure();
+        Facade::getFacadeApplication()->instance(GitHubClient::class, $this->github);
+        $this->fakeAccess();
+        Http::fake([
+            'https://api.github.com/repos/acme/backend/pulls/42' => Http::response([
+                'number' => 42, 'title' => 'Fix checkout', 'state' => 'open',
+            ]),
+        ]);
+
+        $this->assertTrue(GitHub::configured());
+        $this->assertSame([['full_name' => 'acme/backend', 'url' => 'https://github.com/acme/backend']], GitHub::repositories());
+        $pull = GitHub::pullRequest('acme/backend', 42);
+        $this->assertSame(['url' => 'https://github.com/acme/backend/pull/42', 'number' => 42, 'title' => 'Fix checkout', 'state' => 'open'], $pull);
+        $this->assertSame(['data' => [$pull], 'next_page' => null, 'incomplete' => false], GitHub::pullRequests('acme/backend', '#42', false, 1));
     }
 
     public function test_authenticates_paginates_filters_sorts_and_caches_repositories(): void

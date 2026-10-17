@@ -11,6 +11,8 @@ final class GitHubServiceProvider extends ServiceProvider
     public function register(): void
     {
         $this->mergeConfigFrom(__DIR__.'/../config/github.php', 'github');
+
+        $this->app->singleton(GitHubClient::class);
     }
 
     public function boot(): void

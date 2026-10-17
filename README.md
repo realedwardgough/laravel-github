@@ -29,14 +29,15 @@ Use the App ID, not the OAuth client ID. The installation ID belongs to the orga
 ## Usage
 
 ```php
-use Egough\LaravelGitHub\GitHubClient;
+use Egough\LaravelGitHub\Facades\GitHub;
 
-$github = app(GitHubClient::class); // Or constructor-inject it.
-$github->configured(); // Settings are present; does not test connectivity.
-$repositories = $github->repositories();
-$results = $github->pullRequests('your-organisation/repository', 'checkout', false, 1);
-$pull = $github->pullRequest('your-organisation/repository', 42);
+GitHub::configured(); // Settings are present; does not test connectivity.
+$repositories = GitHub::repositories();
+$results = GitHub::pullRequests('your-organisation/repository', 'checkout', false, 1);
+$pull = GitHub::pullRequest('your-organisation/repository', 42);
 ```
+
+The facade resolves the container's shared `Egough\LaravelGitHub\GitHubClient` instance. You can also constructor-inject `GitHubClient` when preferred. Use Laravel's `Http::fake()` to test GitHub requests without calling the real API.
 
 Repositories return a list of `full_name` and `url` pairs. PRs contain `url`, `title`, `number`, and `state` (`open`, `closed`, or `merged`). Search returns `data`, `next_page`, and `incomplete`; a missing individual PR returns `null`.
 
