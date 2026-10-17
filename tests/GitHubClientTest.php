@@ -12,6 +12,7 @@ use Illuminate\Cache\ArrayStore;
 use Illuminate\Cache\Repository as CacheRepository;
 use Illuminate\Config\Repository;
 use Illuminate\Container\Container;
+use Illuminate\Http\Client\ConnectionException;
 use Illuminate\Http\Client\Factory;
 use Illuminate\Http\Client\Request;
 use Illuminate\Support\Carbon;
@@ -218,7 +219,9 @@ final class GitHubClientTest extends TestCase
     {
         $this->configure();
         Http::preventStrayRequests();
-        Http::fake(['https://api.github.com/app/installations/123/access_tokens' => Http::failedConnection()]);
+        Http::fake(['https://api.github.com/app/installations/123/access_tokens' => function (): never {
+            throw new ConnectionException('Connection failed.');
+        }]);
 
         $this->expectException(GitHubUnavailable::class);
         $this->expectExceptionMessage('Unable to reach GitHub. Please try again.');
