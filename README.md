@@ -1,57 +1,284 @@
-# Laravel GitHub
+![Laravel GitHub](https://banners.beyondco.de/egough%2Flaravel-github.png?theme=dark&packageManager=composer+require&packageName=egough%2Flaravel-github&pattern=texture&style=style_2&description=GitHub+Repository+%26+PR+Browsing&md=1&showWatermark=0&fontSize=100px&images=https%3A%2F%2Flaravel.com%2Fimg%2Flogomark.min.svg "Laravel GitHub")
 
-A small Laravel package for connecting a GitHub App installation to one organisation and browsing its repositories and pull requests. Requires PHP 8.4+, OpenSSL and Laravel 13.
+[![Latest Version on Packagist](https://img.shields.io/packagist/v/egough/laravel-github.svg?style=flat-square)](https://packagist.org/packages/egough/laravel-github)
+[![Total Downloads](https://img.shields.io/packagist/dt/egough/laravel-github.svg?style=flat-square)](https://packagist.org/packages/egough/laravel-github)
+[![License](https://img.shields.io/packagist/l/egough/laravel-github.svg?style=flat-square)](https://packagist.org/packages/egough/laravel-github)
+[![Tests](https://github.com/realedwardgough/laravel-github/actions/workflows/tests.yml/badge.svg)](https://github.com/realedwardgough/laravel-github/actions/workflows/tests.yml)
+
+GitHub App connections, repository browsing and pull request search for Laravel.
+
+Connect your application to a GitHub organisation and browse the repositories and pull requests available to its installation. Authentication, token renewal and response caching are handled automatically.
+
+---
+
+## Quick Example
+
+```php
+use Egough\LaravelGitHub\Facades\GitHub;
+
+// Browse the organisation's accessible repositories.
+$repositories = GitHub::repositories();
+
+// Search open pull requests by title.
+$results = GitHub::pullRequests('acme/backend', 'checkout', false, 1);
+
+// Get a pull request's title and current state.
+$pull = GitHub::pullRequest('acme/backend', 42);
+```
+
+---
+
+## When Should I Use This Package?
+
+Use this package when your Laravel application needs to browse an organisation's repositories and pull requests through a GitHub App.
+
+Typical use cases include:
+
+* Linking repositories to projects
+* Attaching pull requests to support tickets or tasks
+* Showing pull request titles and open, closed or merged states
+* Building repository selectors and pull request search interfaces
+
+Your application controls the routes, permissions, UI and storage of selected links.
+
+### Connection Support
+
+The package currently supports one GitHub App installation and one configured organisation. It provides read-only repository and pull request browsing. Personal access tokens, user OAuth, multiple connections and webhook handling are outside its current scope.
+
+---
 
 ## Installation
 
-```sh
+```bash
 composer require egough/laravel-github
+```
+
+Laravel discovers the service provider automatically.
+
+Optionally publish the configuration:
+
+```bash
 php artisan vendor:publish --tag=github-config
 ```
 
-Laravel discovers the service provider automatically. Publishing configuration is optional.
+No migrations are required.
 
-## GitHub App setup
+---
 
-Create a GitHub App with **Repository metadata: read** and **Pull requests: read** permissions. Install it on the organisation and grant access to the repositories you want to browse. No webhooks or OAuth callback are needed for this read-only integration.
+## GitHub App Setup
 
-Generate a private key, store it outside your repository and public web directory, and make it readable by the PHP process. Configure:
+1. Create a GitHub App with **Repository metadata: read** and **Pull requests: read** permissions.
+2. Install the app on your organisation and grant access to the repositories you want to browse.
+3. Generate a private key and store it outside your repository and public web directory. The PHP process must be able to read it.
+4. Add the connection settings to your application's `.env` file:
 
 ```dotenv
-GITHUB_ORGANISATION=your-organisation
+GITHUB_ORGANISATION=acme
 GITHUB_APP_ID=123456
 GITHUB_INSTALLATION_ID=789012
 GITHUB_PRIVATE_KEY_PATH=/absolute/path/to/github-app.pem
 ```
 
-Use the App ID, not the OAuth client ID. The installation ID belongs to the organisation installation. The package supports one configured installation; personal tokens, multiple connections, routes, storage and UI are outside its initial scope.
+Use the GitHub **App ID**, rather than its OAuth client ID. The installation ID identifies the app's installation on your organisation.
 
-## Usage
+No webhook endpoint or OAuth callback is needed for this integration.
+
+Check whether the required settings are present:
+
+```php
+GitHub::configured();
+```
+
+This checks configuration values only. It does not verify the private key, connectivity or repository permissions.
+
+---
+
+## Repositories
 
 ```php
 use Egough\LaravelGitHub\Facades\GitHub;
 
-GitHub::configured(); // Settings are present; does not test connectivity.
 $repositories = GitHub::repositories();
-$results = GitHub::pullRequests('your-organisation/repository', 'checkout', false, 1);
-$pull = GitHub::pullRequest('your-organisation/repository', 42);
 ```
 
-The facade resolves the container's shared `Egough\LaravelGitHub\GitHubClient` instance. You can also constructor-inject `GitHubClient` when preferred. Use Laravel's `Http::fake()` to test GitHub requests without calling the real API.
+Returns all repositories accessible to the installation that belong to the configured organisation, sorted by full name:
 
-Repositories return a list of `full_name` and `url` pairs. PRs contain `url`, `title`, `number`, and `state` (`open`, `closed`, or `merged`). Search returns `data`, `next_page`, and `incomplete`; a missing individual PR returns `null`.
+```php
+[
+    ['full_name' => 'acme/backend', 'url' => 'https://github.com/acme/backend'],
+    ['full_name' => 'acme/frontend', 'url' => 'https://github.com/acme/frontend'],
+]
+```
 
-Search is limited to accessible repositories and matches titles. Use `42` or `#42` for an exact lookup. Pass `true` as the third search argument to include closed/merged PRs. Results are ordered by most recently updated, with 30 per page. GitHub search is limited to 1,000 results; use `incomplete` to prompt a narrower search. Merged status depends on the upstream response including merge information.
+Repository pagination is handled automatically. Private repositories are included when the installation has access to them.
 
-Catch `Egough\LaravelGitHub\RepositoryUnavailable` for repositories outside the configured installation/organisation, and `Egough\LaravelGitHub\GitHubUnavailable` for authentication, configuration or upstream failures. Exceptions do not expose upstream response bodies. Your application owns input validation, authorization, endpoint throttling and exception rendering. For search endpoints validate page 1–34, positive PR numbers, a bounded search string, and `owner/repository` input.
+---
 
-The package uses Laravel's default cache store. Repository lists are cached for 300 seconds and PR results for 60 seconds; change these through `github.cache.repositories` and `github.cache.pull_requests` (seconds). Installation tokens are cached until one minute before expiry and refreshed once after a 401. Use a protected cache backend because tokens are sensitive. Cache keys are scoped to connection settings. Requests connect within 3 seconds and time out after 10 seconds.
+## Pull Requests
 
-Change `github.user_agent` and `github.api_version` in the published configuration if required.
+### Search by Title
 
-## Local development
+```php
+$results = GitHub::pullRequests(
+    repository: 'acme/backend',
+    search: 'checkout',
+    includeClosed: false,
+    page: 1,
+);
+```
 
-In the consuming project's `composer.json`, add:
+An empty search returns the most recently updated pull requests. Set `includeClosed` to `true` to include closed and merged pull requests.
+
+The result contains the pull requests and pagination information:
+
+```php
+[
+    'data' => [
+        [
+            'url' => 'https://github.com/acme/backend/pull/42',
+            'number' => 42,
+            'title' => 'Fix checkout',
+            'state' => 'open',
+        ],
+    ],
+    'next_page' => null,
+    'incomplete' => false,
+]
+```
+
+Search results are ordered by most recently updated, with 30 results per page. Pass `next_page` into the next call to load more results; `null` means there are no further pages.
+
+GitHub search exposes up to 1,000 results. When `incomplete` is `true`, ask users to narrow their search.
+
+### Find by Number
+
+Search using `42` or `#42` for an exact pull request lookup:
+
+```php
+$results = GitHub::pullRequests('acme/backend', '#42', true, 1);
+```
+
+The open/closed filter still applies to an exact-number search.
+
+### Retrieve Details
+
+```php
+$pull = GitHub::pullRequest('acme/backend', 42);
+```
+
+Returns a single pull request with `url`, `number`, `title` and `state`, or `null` when it cannot be found.
+
+States are `open`, `closed` or `merged`. Merged status is returned when GitHub includes merge information in the response.
+
+All pull request lookups are restricted to repositories accessible through the configured organisation and installation.
+
+---
+
+## Dependency Injection
+
+You can also inject the client into a controller or service:
+
+```php
+use Egough\LaravelGitHub\GitHubClient;
+
+public function __construct(
+    private GitHubClient $github,
+) {}
+```
+
+```php
+$repositories = $this->github->repositories();
+```
+
+The facade and injected client resolve the same shared container instance.
+
+---
+
+## Configuration
+
+Publishing configuration creates `config/github.php`:
+
+```php
+return [
+    'organisation' => env('GITHUB_ORGANISATION'),
+    'app_id' => env('GITHUB_APP_ID'),
+    'installation_id' => env('GITHUB_INSTALLATION_ID'),
+    'private_key_path' => env('GITHUB_PRIVATE_KEY_PATH'),
+    'user_agent' => 'egough-laravel-github',
+    'api_version' => '2026-03-10',
+    'cache' => [
+        'repositories' => 300,
+        'pull_requests' => 60,
+    ],
+];
+```
+
+Cache durations are in seconds. The user agent and GitHub API version can be changed here when needed.
+
+---
+
+## Caching and Authentication
+
+The package uses Laravel's default cache store:
+
+* Repository lists are cached for five minutes.
+* Pull request searches and details are cached for one minute.
+* Installation tokens are cached until one minute before expiry.
+
+Cache keys are scoped to the connection settings. Use a protected cache backend because installation tokens are sensitive.
+
+The client signs a JWT using your app's private key and exchanges it for an installation token. A `401` response triggers one token refresh and retry. Requests have a three-second connection timeout and a ten-second overall timeout.
+
+---
+
+## Error Handling
+
+The package throws exceptions and lets your application decide how to present them:
+
+```php
+use Egough\LaravelGitHub\Facades\GitHub;
+use Egough\LaravelGitHub\GitHubUnavailable;
+use Egough\LaravelGitHub\RepositoryUnavailable;
+
+try {
+    $pull = GitHub::pullRequest('acme/backend', 42);
+} catch (RepositoryUnavailable $exception) {
+    // The repository is outside the configured organisation or installation access.
+} catch (GitHubUnavailable $exception) {
+    // Configuration, authentication or an upstream request failed.
+}
+```
+
+Upstream response bodies are not included in exception messages. A missing individual pull request returns `null` rather than throwing `RepositoryUnavailable`.
+
+Your application is responsible for input validation, authorization and endpoint throttling. For browsing endpoints, validate `owner/repository` input, positive PR numbers, bounded search strings and search pages from 1 to 34.
+
+---
+
+## Testing
+
+Install development dependencies and run the package tests:
+
+```bash
+composer install
+composer test
+```
+
+Or run PHPUnit directly:
+
+```bash
+vendor/bin/phpunit
+```
+
+Tests fake HTTP requests and use an in-memory cache. No GitHub credentials, network access or external database are required to run them after dependencies are installed.
+
+In your application's tests, use Laravel's `Http::fake()` to provide GitHub responses and `Http::preventStrayRequests()` to prevent unexpected real requests.
+
+---
+
+## Local Development
+
+To use a local checkout, add a path repository to the consuming application's `composer.json`. Adjust the path to match your directory layout:
 
 ```json
 {
@@ -59,12 +286,35 @@ In the consuming project's `composer.json`, add:
         {
             "type": "path",
             "url": "../packages/laravel-github",
-            "options": { "symlink": true, "versions": { "egough/laravel-github": "dev-main" } }
+            "options": {
+                "symlink": true,
+                "versions": {
+                    "egough/laravel-github": "^1.0.0"
+                }
+            }
         }
     ]
 }
 ```
 
-Then run `composer require egough/laravel-github:dev-main`. PHP source changes are immediately available through the symlink. Rerun Composer after metadata or dependency changes. This local path must exist wherever the consuming application installs dependencies; replace it with a published release or a reachable VCS repository before deployment/CI.
+```bash
+composer require egough/laravel-github:^1.0.0
+```
 
-Run the package's standalone tests with `composer install` then `composer test`. Tests fake HTTP and need no GitHub credentials. Publishing and release automation are deferred until local integration is verified.
+PHP source changes are immediately available through the symlink. Rerun Composer when package metadata or dependencies change.
+
+The path must exist wherever the consuming application installs dependencies. Replace the local path dependency with a published release or a reachable Git repository before using it in CI or deployment.
+
+---
+
+## Requirements
+
+* PHP 8.4+
+* Laravel 13
+* OpenSSL PHP extension
+
+---
+
+## License
+
+MIT — see [LICENSE](LICENSE).
