@@ -309,8 +309,8 @@ The path must exist wherever the consuming application installs dependencies. Re
 
 ## Requirements
 
-* PHP 8.4+
-* Laravel 13
+* PHP 8.2+
+* Laravel 10, 11, 12, or 13 (subject to each Laravel version's PHP requirements)
 * OpenSSL PHP extension
 
 ---

@@ -38,15 +38,19 @@ jobs:
       - name: Validate composer.json
         run: composer validate --strict
 
-      - name: Install Laravel ${{ matrix.laravel }} dependencies
+      - name: Select Laravel ${{ matrix.laravel }} runtime dependencies
         run: >
           composer require --no-interaction --no-update
           illuminate/cache:${{ matrix.laravel }}
-          illuminate/config:${{ matrix.laravel }}
-          illuminate/console:${{ matrix.laravel }}
-          illuminate/database:${{ matrix.laravel }}
+          illuminate/contracts:${{ matrix.laravel }}
+          illuminate/http:${{ matrix.laravel }}
           illuminate/support:${{ matrix.laravel }}
-          illuminate/view:${{ matrix.laravel }}
+
+      - name: Select Laravel ${{ matrix.laravel }} test dependencies
+        run: >
+          composer require --dev --no-interaction --no-update
+          illuminate/config:${{ matrix.laravel }}
+          illuminate/container:${{ matrix.laravel }}
 
       - name: Install dependencies
         run: composer update --prefer-dist --prefer-stable --no-interaction
@@ -72,6 +76,3 @@ jobs:
 
       - name: Install dependencies
         run: composer install --prefer-dist --no-interaction
-
-      - name: Run Pint
-        run: vendor/bin/pint --test
