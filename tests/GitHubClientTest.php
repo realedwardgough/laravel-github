@@ -245,6 +245,181 @@ final class GitHubClientTest extends TestCase
         Http::assertSent(fn (Request $request): bool => $request->hasHeader('User-Agent', 'ExampleApplication') && $request->hasHeader('X-GitHub-Api-Version', '2026-03-10'));
     }
 
+    public function test_lists_open_pull_requests_with_draft_and_requested_review_metadata_and_pagination(): void
+    {
+        $this->configure();
+        $this->fakeAccess();
+        Http::fake([
+            'https://api.github.com/repos/acme/backend/pulls*' => Http::sequence()
+                ->push([
+                    $this->openPull(1),
+                    $this->openPull(2, ['draft' => true, 'requested_reviewers' => [['login' => 'reviewer']]]),
+                    $this->openPull(3, ['requested_teams' => [['slug' => 'engineering']]]),
+                ], 200, ['Link' => '<https://api.github.com/repos/acme/backend/pulls?page=2>; rel="next"'])
+                ->push([$this->openPull(4)]),
+        ]);
+
+        $result = $this->github->openPullRequests('ACME/backend');
+
+        $this->assertSame([
+            'url' => 'https://github.com/acme/backend/pull/1', 'number' => 1, 'title' => 'Pull request 1',
+            'state' => 'open', 'draft' => false, 'waiting_for_review' => false,
+            'created_at' => '2026-10-20T12:00:00Z', 'updated_at' => '2026-10-21T12:00:00Z',
+        ], $result['data'][0]);
+        $this->assertTrue($result['data'][1]['draft']);
+        $this->assertTrue($result['data'][1]['waiting_for_review']);
+        $this->assertTrue($result['data'][2]['waiting_for_review']);
+        $this->assertSame(2, $result['next_page']);
+        $this->assertSame($result, $this->github->openPullRequests('acme/backend'));
+        $last = $this->github->openPullRequests('acme/backend', 2);
+        $this->assertSame(4, $last['data'][0]['number']);
+        $this->assertNull($last['next_page']);
+        Http::assertSentCount(4);
+        Http::assertSent(fn (Request $request): bool => str_contains($request->url(), '/repos/acme/backend/pulls')
+            && $request['state'] === 'open' && $request['per_page'] === 100 && $request['page'] === 2);
+        Http::assertNotSent(fn (Request $request): bool => str_contains($request->url(), '/search/issues'));
+    }
+
+    public function test_open_pull_request_cache_refreshes_review_and_draft_changes(): void
+    {
+        $this->configure();
+        $this->fakeAccess();
+        Carbon::setTestNow('2026-10-24 12:00:00');
+        Http::fake([
+            'https://api.github.com/repos/acme/backend/pulls*' => Http::sequence()
+                ->push([$this->openPull(1, ['draft' => true])])
+                ->push([$this->openPull(1, ['requested_reviewers' => [['login' => 'reviewer']]])]),
+        ]);
+
+        $this->assertTrue($this->github->openPullRequests('acme/backend')['data'][0]['draft']);
+        Carbon::setTestNow(Carbon::now()->addSeconds(61));
+        $refreshed = $this->github->openPullRequests('acme/backend')['data'][0];
+
+        $this->assertFalse($refreshed['draft']);
+        $this->assertTrue($refreshed['waiting_for_review']);
+        Http::assertSentCount(4);
+    }
+
+    public function test_open_pull_requests_reject_inaccessible_repositories(): void
+    {
+        $this->configure();
+        $this->fakeAccess();
+
+        try {
+            $this->github->openPullRequests('other/private');
+            $this->fail('Expected inaccessible repository to be rejected.');
+        } catch (RepositoryUnavailable) {
+            Http::assertNotSent(fn (Request $request): bool => str_contains($request->url(), '/repos/other/'));
+        }
+    }
+
+    #[TestWith([403])]
+    #[TestWith([429])]
+    #[TestWith([500])]
+    public function test_open_pull_request_errors_are_safe_and_not_cached(int $status): void
+    {
+        $this->configure();
+        $this->fakeAccess();
+        Http::fake([
+            'https://api.github.com/repos/acme/backend/pulls*' => Http::sequence()
+                ->push(['message' => 'private upstream details'], $status)->push([]),
+        ]);
+
+        try {
+            $this->github->openPullRequests('acme/backend');
+            $this->fail('Expected upstream error to be reported.');
+        } catch (GitHubUnavailable $exception) {
+            $this->assertSame('GitHub is unavailable. Check app access or try again later.', $exception->getMessage());
+        }
+        $this->assertSame(['data' => [], 'next_page' => null], $this->github->openPullRequests('acme/backend'));
+        Http::assertSentCount(4);
+    }
+
+    public function test_open_pull_requests_reject_invalid_pages_before_sending_requests(): void
+    {
+        Http::preventStrayRequests();
+
+        try {
+            $this->github->openPullRequests('acme/backend', 0);
+            $this->fail('Expected invalid page to be rejected.');
+        } catch (\InvalidArgumentException $exception) {
+            $this->assertSame('The page must be greater than zero.', $exception->getMessage());
+            Http::assertNothingSent();
+        }
+    }
+
+    /**
+     * @param  array<string, mixed>  $overrides
+     * @return array<string, mixed>
+     */
+    private function openPull(int $number, array $overrides = []): array
+    {
+        return [...[
+            'number' => $number, 'title' => 'Pull request '.$number, 'state' => 'open', 'draft' => false,
+            'requested_reviewers' => [], 'requested_teams' => [],
+            'created_at' => '2026-10-20T12:00:00Z', 'updated_at' => '2026-10-21T12:00:00Z',
+        ], ...$overrides];
+    }
+
+    public function test_clients_with_different_configurations_keep_repository_access_and_caches_separate(): void
+    {
+        $this->configure();
+        $otherConfig = new Repository(['github' => [
+            'organisation' => 'other', 'app_id' => '789', 'installation_id' => '999',
+            'private_key_path' => $this->privateKeyPath,
+        ]]);
+        $otherClient = new GitHubClient(config: $otherConfig);
+        Http::preventStrayRequests();
+        Http::fake([
+            'https://api.github.com/app/installations/123/access_tokens' => Http::response([
+                'token' => 'secret', 'expires_at' => Carbon::now()->addHour()->toIso8601String(),
+            ], 201),
+            'https://api.github.com/app/installations/999/access_tokens' => Http::response([
+                'token' => 'other-secret', 'expires_at' => Carbon::now()->addHour()->toIso8601String(),
+            ], 201),
+            'https://api.github.com/installation/repositories*' => fn (Request $request) => Http::response([
+                'repositories' => [$this->repository($request->hasHeader('Authorization', 'Bearer other-secret') ? 'other/frontend' : 'acme/backend')],
+            ]),
+            'https://api.github.com/repos/acme/backend/pulls/42' => Http::response([
+                'number' => 42, 'title' => 'Backend change', 'state' => 'open',
+            ]),
+            'https://api.github.com/repos/other/frontend/pulls/42' => Http::response([
+                'number' => 42, 'title' => 'Frontend change', 'state' => 'closed',
+            ]),
+        ]);
+
+        $first = $this->github->pullRequest('acme/backend', 42);
+        $second = $otherClient->pullRequest('other/frontend', 42);
+
+        $this->assertSame('Backend change', $first['title']);
+        $this->assertSame('Frontend change', $second['title']);
+        $this->assertSame($first, $this->github->pullRequest('acme/backend', 42));
+        $this->assertSame($second, $otherClient->pullRequest('other/frontend', 42));
+        Http::assertSentCount(6);
+        Http::assertSent(fn (Request $request): bool => str_contains($request->url(), '/repos/other/frontend/')
+            && $request->hasHeader('Authorization', 'Bearer other-secret'));
+
+        $this->expectException(RepositoryUnavailable::class);
+        $otherClient->pullRequest('acme/backend', 42);
+    }
+
+    public function test_clients_with_the_same_configuration_reuse_cached_tokens_and_results(): void
+    {
+        $this->configure();
+        $this->fakeAccess();
+        Http::fake([
+            'https://api.github.com/repos/acme/backend/pulls/42' => Http::response([
+                'number' => 42, 'title' => 'Fix checkout', 'state' => 'open',
+            ]),
+        ]);
+        $first = $this->github->pullRequest('acme/backend', 42);
+
+        $second = (new GitHubClient(config: $this->config))->pullRequest('acme/backend', 42);
+
+        $this->assertSame($first, $second);
+        Http::assertSentCount(3);
+    }
+
     private function configure(): void
     {
         $key = openssl_pkey_new(['private_key_bits' => 2048]);
