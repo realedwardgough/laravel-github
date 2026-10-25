@@ -12,4 +12,9 @@ final class InvalidPage extends InvalidArgumentException
     {
         return new self(message: 'The page must be greater than zero.');
     }
+
+    public static function searchLimitExceeded(): self
+    {
+        return new self(message: 'Search pages must not exceed 34.');
+    }
 }

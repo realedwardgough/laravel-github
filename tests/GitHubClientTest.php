@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace Egough\LaravelGitHub\Tests;
 
+use Egough\LaravelGitHub\Exceptions\InvalidPage;
+use Egough\LaravelGitHub\Exceptions\MissingRepository;
 use Egough\LaravelGitHub\Facades\GitHub;
 use Egough\LaravelGitHub\GitHubClient;
 use Egough\LaravelGitHub\GitHubUnavailable;
@@ -418,6 +420,278 @@ final class GitHubClientTest extends TestCase
 
         $this->assertSame($first, $second);
         Http::assertSentCount(3);
+    }
+
+    #[TestWith(['pullRequests'])]
+    #[TestWith(['openPullRequests'])]
+    public function test_fluent_queries_do_not_send_requests_until_get(string $method): void
+    {
+        Http::preventStrayRequests();
+
+        $this->github->{$method}()->repository('acme/backend')->page(2);
+
+        Http::assertNothingSent();
+    }
+
+    #[TestWith(['pullRequests'])]
+    #[TestWith(['openPullRequests'])]
+    public function test_fluent_queries_require_a_repository_before_sending_requests(string $method): void
+    {
+        Http::preventStrayRequests();
+
+        try {
+            $this->github->{$method}()->get();
+            $this->fail('Expected a missing repository to be rejected.');
+        } catch (MissingRepository $exception) {
+            $this->assertSame('A repository must be specified before retrieving pull requests.', $exception->getMessage());
+        }
+        Http::assertNothingSent();
+    }
+
+    #[TestWith(['pullRequests', ''])]
+    #[TestWith(['pullRequests', '  '])]
+    #[TestWith(['openPullRequests', ''])]
+    #[TestWith(['openPullRequests', '  '])]
+    public function test_fluent_queries_reject_blank_repositories_before_sending_requests(string $method, string $repository): void
+    {
+        Http::preventStrayRequests();
+
+        try {
+            $this->github->{$method}()->repository($repository)->get();
+            $this->fail('Expected a blank repository to be rejected.');
+        } catch (MissingRepository $exception) {
+            $this->assertSame('A repository must be specified before retrieving pull requests.', $exception->getMessage());
+        }
+        Http::assertNothingSent();
+    }
+
+    #[TestWith(['pullRequests', 0])]
+    #[TestWith(['pullRequests', -1])]
+    #[TestWith(['openPullRequests', 0])]
+    #[TestWith(['openPullRequests', -1])]
+    public function test_fluent_queries_reject_non_positive_pages_before_sending_requests(string $method, int $page): void
+    {
+        Http::preventStrayRequests();
+
+        try {
+            $this->github->{$method}()->repository('acme/backend')->page($page)->get();
+            $this->fail('Expected a non-positive page to be rejected.');
+        } catch (InvalidPage $exception) {
+            $this->assertSame('The page must be greater than zero.', $exception->getMessage());
+        }
+        Http::assertNothingSent();
+    }
+
+    public function test_fluent_search_rejects_pages_above_the_search_limit_before_sending_requests(): void
+    {
+        Http::preventStrayRequests();
+
+        try {
+            $this->github->pullRequests()->repository('acme/backend')->page(35)->get();
+            $this->fail('Expected a page beyond the search limit to be rejected.');
+        } catch (InvalidPage $exception) {
+            $this->assertSame('Search pages must not exceed 34.', $exception->getMessage());
+        }
+        Http::assertNothingSent();
+    }
+
+    public function test_fluent_search_defaults_match_direct_calls_and_share_cached_results(): void
+    {
+        $this->configure();
+        $this->fakeAccess();
+        Http::fake(['https://api.github.com/search/issues*' => Http::response([
+            'items' => [['number' => 42, 'title' => 'Fix checkout', 'state' => 'open']], 'total_count' => 1,
+        ])]);
+
+        $result = $this->github->pullRequests()->repository('acme/backend')->get();
+
+        $this->assertSame([
+            'data' => [['url' => 'https://github.com/acme/backend/pull/42', 'number' => 42, 'title' => 'Fix checkout', 'state' => 'open']],
+            'next_page' => null, 'incomplete' => false,
+        ], $result);
+        $this->assertSame($result, $this->github->pullRequests('acme/backend'));
+        Http::assertSent(fn (Request $request): bool => str_contains($request->url(), '/search/issues')
+            && $request['q'] === 'repo:acme/backend is:pr is:open' && $request['page'] === 1);
+        Http::assertSentCount(3);
+    }
+
+    public function test_facade_fluent_search_preserves_filters_pagination_and_direct_call_caching(): void
+    {
+        $this->configure();
+        Facade::getFacadeApplication()->instance(GitHubClient::class, $this->github);
+        $this->fakeAccess();
+        Http::fake(['https://api.github.com/search/issues*' => Http::response([
+            'items' => [['number' => 42, 'title' => 'Fix checkout', 'state' => 'closed']], 'total_count' => 61,
+        ])]);
+
+        $result = GitHub::pullRequests()->repository('acme/backend')->search('checkout')->withClosed()->page(2)->get();
+
+        $this->assertSame([
+            'data' => [['url' => 'https://github.com/acme/backend/pull/42', 'number' => 42, 'title' => 'Fix checkout', 'state' => 'closed']],
+            'next_page' => 3, 'incomplete' => false,
+        ], $result);
+        $this->assertSame($result, GitHub::pullRequests(repository: 'acme/backend', search: 'checkout', includeClosed: true, page: 2));
+        Http::assertSent(fn (Request $request): bool => str_contains($request->url(), '/search/issues')
+            && $request['q'] === 'repo:acme/backend is:pr "checkout" in:title' && $request['page'] === 2);
+        Http::assertSentCount(3);
+    }
+
+    #[TestWith(['closed', null])]
+    #[TestWith(['merged', '2026-10-21T12:00:00Z'])]
+    public function test_fluent_exact_number_searches_respect_closed_filter_and_merged_state(string $expectedState, ?string $mergedAt): void
+    {
+        $this->configure();
+        $this->fakeAccess();
+        Http::fake(['https://api.github.com/repos/acme/backend/pulls/42' => Http::response([
+            'number' => 42, 'title' => 'Fix checkout', 'state' => 'closed', 'merged_at' => $mergedAt,
+        ])]);
+        $query = $this->github->pullRequests()->repository('acme/backend')->search('#42');
+
+        $result = $query->withClosed()->get();
+
+        $this->assertSame($expectedState, $result['data'][0]['state']);
+        $this->assertSame(['data' => [], 'next_page' => null, 'incomplete' => false], $query->get());
+        Http::assertNotSent(fn (Request $request): bool => str_contains($request->url(), '/search/issues'));
+        Http::assertSentCount(3);
+    }
+
+    public function test_fluent_search_branches_and_fresh_queries_keep_options_independent(): void
+    {
+        $this->configure();
+        $this->fakeAccess();
+        Http::fake(['https://api.github.com/search/issues*' => Http::response(['items' => [], 'total_count' => 0])]);
+        $base = $this->github->pullRequests()->repository('acme/backend')->search('base');
+        $checkout = $base->search('discard')->search('checkout')->withClosed()->page(2);
+        $another = $checkout->search('another')->withClosed(false)->page(9)->page(3);
+
+        $checkout->get();
+        $base->get();
+        $another->get();
+        $this->github->pullRequests()->repository('acme/backend')->get();
+
+        Http::assertSent(fn (Request $request): bool => str_contains($request->url(), '/search/issues') && $request['q'] === 'repo:acme/backend is:pr "checkout" in:title' && $request['page'] === 2);
+        Http::assertSent(fn (Request $request): bool => str_contains($request->url(), '/search/issues') && $request['q'] === 'repo:acme/backend is:pr is:open "base" in:title' && $request['page'] === 1);
+        Http::assertSent(fn (Request $request): bool => str_contains($request->url(), '/search/issues') && $request['q'] === 'repo:acme/backend is:pr is:open "another" in:title' && $request['page'] === 3);
+        Http::assertSent(fn (Request $request): bool => str_contains($request->url(), '/search/issues') && $request['q'] === 'repo:acme/backend is:pr is:open' && $request['page'] === 1);
+        Http::assertSentCount(6);
+    }
+
+    #[TestWith(['pullRequests'])]
+    #[TestWith(['openPullRequests'])]
+    public function test_changing_a_fluent_repository_preserves_the_base_query_and_access_checks(string $method): void
+    {
+        $this->configure();
+        $this->fakeAccess();
+        Http::fake([
+            'https://api.github.com/search/issues*' => Http::response(['items' => [], 'total_count' => 0]),
+            'https://api.github.com/repos/acme/backend/pulls*' => Http::response([]),
+        ]);
+        $base = $this->github->{$method}()->repository('acme/backend');
+        $inaccessible = $base->repository('other/private');
+
+        try {
+            $inaccessible->get();
+            $this->fail('Expected the inaccessible repository to be rejected.');
+        } catch (RepositoryUnavailable $exception) {
+            $this->assertSame('Repository unavailable.', $exception->getMessage());
+        }
+        $this->assertSame([], $base->get()['data']);
+        $this->assertSame([], $inaccessible->repository('acme/backend')->get()['data']);
+        Http::assertNotSent(fn (Request $request): bool => str_contains($request->url(), '/repos/other/'));
+        Http::assertSentCount(3);
+    }
+
+    public function test_facade_fluent_open_lists_preserve_metadata_pagination_caching_and_query_reuse(): void
+    {
+        $this->configure();
+        Facade::getFacadeApplication()->instance(GitHubClient::class, $this->github);
+        $this->fakeAccess();
+        Http::fake(['https://api.github.com/repos/acme/backend/pulls*' => Http::sequence()
+            ->push([$this->openPull(42, ['draft' => true, 'requested_teams' => [['slug' => 'engineering']]])], 200, [
+                'Link' => '<https://api.github.com/repos/acme/backend/pulls?page=2>; rel="next"',
+            ])->push([$this->openPull(43)])]);
+        $query = GitHub::openPullRequests()->repository('acme/backend');
+
+        $first = $query->get();
+        $second = $query->page(9)->page(2)->get();
+
+        $this->assertSame([
+            'data' => [[
+                'url' => 'https://github.com/acme/backend/pull/42', 'number' => 42, 'title' => 'Pull request 42',
+                'state' => 'open', 'draft' => true, 'waiting_for_review' => true,
+                'created_at' => '2026-10-20T12:00:00Z', 'updated_at' => '2026-10-21T12:00:00Z',
+            ]],
+            'next_page' => 2,
+        ], $first);
+        $this->assertSame(43, $second['data'][0]['number']);
+        $this->assertNull($second['next_page']);
+        $this->assertSame($first, $query->get());
+        $this->assertSame($first, GitHub::openPullRequests(repository: 'acme/backend', page: 1));
+        $this->assertSame($second, GitHub::openPullRequests('acme/backend', 2));
+        Http::assertSentCount(4);
+    }
+
+    public function test_fluent_queries_accept_named_initial_options_and_open_lists_have_no_search_page_limit(): void
+    {
+        $this->configure();
+        $this->fakeAccess();
+        Http::fake([
+            'https://api.github.com/search/issues*' => Http::response(['items' => [], 'total_count' => 0]),
+            'https://api.github.com/repos/acme/backend/pulls*' => Http::response([]),
+        ]);
+        $search = $this->github->pullRequests(search: 'checkout', includeClosed: true, page: 2)->repository('acme/backend');
+        $open = $this->github->openPullRequests(page: 35)->repository('acme/backend');
+        Http::assertNothingSent();
+
+        $this->assertSame(['data' => [], 'next_page' => null, 'incomplete' => false], $search->get());
+        $this->assertSame(['data' => [], 'next_page' => null], $open->get());
+
+        Http::assertSent(fn (Request $request): bool => str_contains($request->url(), '/search/issues')
+            && $request['q'] === 'repo:acme/backend is:pr "checkout" in:title' && $request['page'] === 2);
+        Http::assertSent(fn (Request $request): bool => str_contains($request->url(), '/repos/acme/backend/pulls') && $request['page'] === 35);
+        Http::assertSentCount(4);
+    }
+
+    public function test_fluent_search_accepts_the_last_search_page_and_preserves_incomplete_results(): void
+    {
+        $this->configure();
+        $this->fakeAccess();
+        Http::fake(['https://api.github.com/search/issues*' => Http::response([
+            'items' => [], 'total_count' => 1200, 'incomplete_results' => true,
+        ])]);
+
+        $result = $this->github->pullRequests()->repository('acme/backend')->page(34)->get();
+
+        $this->assertSame(['data' => [], 'next_page' => null, 'incomplete' => true], $result);
+        Http::assertSent(fn (Request $request): bool => str_contains($request->url(), '/search/issues') && $request['page'] === 34);
+    }
+
+    #[TestWith(['pullRequests'])]
+    #[TestWith(['openPullRequests'])]
+    public function test_fluent_queries_preserve_safe_upstream_exceptions(string $method): void
+    {
+        $this->configure();
+        $this->fakeAccess();
+        Http::fake([
+            'https://api.github.com/search/issues*' => Http::response(['message' => 'private upstream details'], 429),
+            'https://api.github.com/repos/acme/backend/pulls*' => Http::response(['message' => 'private upstream details'], 429),
+        ]);
+
+        $this->expectException(GitHubUnavailable::class);
+        $this->expectExceptionMessage('GitHub is unavailable. Check app access or try again later.');
+        $this->github->{$method}()->repository('acme/backend')->get();
+    }
+
+    public function test_direct_search_keeps_its_existing_page_validation_behaviour(): void
+    {
+        $this->configure();
+        $this->fakeAccess();
+        Http::fake(['https://api.github.com/search/issues*' => Http::response(['items' => [], 'total_count' => 0])]);
+
+        $result = $this->github->pullRequests(repository: 'acme/backend', page: 35);
+
+        $this->assertSame(['data' => [], 'next_page' => null, 'incomplete' => false], $result);
+        Http::assertSent(fn (Request $request): bool => str_contains($request->url(), '/search/issues') && $request['page'] === 35);
     }
 
     private function configure(): void
