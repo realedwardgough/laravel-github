@@ -19,12 +19,30 @@ use Egough\LaravelGitHub\Facades\GitHub;
 // Browse the organisation's accessible repositories.
 $repositories = GitHub::repositories();
 
+// List open pull requests with draft and review-request metadata.
+$openPulls = GitHub::openPullRequests()
+    ->repository('acme/backend')
+    ->get();
+
 // Search open pull requests by title.
-$results = GitHub::pullRequests('acme/backend', 'checkout', false, 1);
+$results = GitHub::pullRequests()
+    ->repository('acme/backend')
+    ->search('checkout')
+    ->get();
 
 // Get a pull request's title and current state.
 $pull = GitHub::pullRequest('acme/backend', 42);
 ```
+
+---
+
+## Changes in v1.0.4
+
+The **v1.0.4** release adds immutable fluent queries and open pull request listings with draft flags, requested-review status and timestamps. Existing direct calls, named arguments, response shapes, configuration and caching behaviour remain supported.
+
+Internals are now organised into authentication, resource, HTTP transport, exception and cache-key classes. Continue using the facade or `GitHubClient`; existing client construction remains supported. Exceptions now live under `Egough\LaravelGitHub\Exceptions` and provide named factories for fixed messages. The old exception imports are deprecated but supported throughout v1.x; see [migration guidance](#exception-migration).
+
+See [docs.md](docs.md) for the full documentation and release changes.
 
 ---
 
@@ -115,6 +133,65 @@ Repository pagination is handled automatically. Private repositories are include
 ---
 
 ## Pull Requests
+
+### Fluent Queries
+
+Calling `pullRequests()` or `openPullRequests()` without a repository returns a query builder. Passing a repository executes immediately, so existing calls still work:
+
+```php
+$results = GitHub::pullRequests('acme/backend', 'checkout', false, 1);
+$openPulls = GitHub::openPullRequests('acme/backend', 1);
+```
+
+Search builders support `repository()`, `search()`, `withClosed()`, `page()` and `get()`. They default to an empty search, open PRs only and page 1. Use `withClosed()` to include closed and merged PRs, or `withClosed(false)` to exclude them again. Open-list builders support `repository()`, `page()` and `get()`.
+
+Setters return new builders without changing the source, so queries can be reused:
+
+```php
+$base = GitHub::pullRequests()->repository('acme/backend');
+$checkout = $base->search('checkout');
+
+$openCheckout = $checkout->get();
+$allCheckout = $checkout->withClosed()->get();
+$nextPage = $checkout->page(2)->get();
+```
+
+Capture the returned builder when changing a variable: `$query = $query->page(2);`.
+
+Only `get()` executes a request, retrieving one page through the same authentication, access checks and cache as equivalent direct calls. It does not advance the page. Before execution, it validates that the repository is non-blank and the page is valid: search pages must be 1 to 34; open-list pages must be positive. Invalid queries throw `MissingRepository` or `InvalidPage` from `Egough\LaravelGitHub\Exceptions`, both extending `InvalidArgumentException`.
+
+### List Open Pull Requests
+
+```php
+$results = GitHub::openPullRequests()
+    ->repository('acme/backend')
+    ->page(1)
+    ->get();
+```
+
+Returns open pull requests, including drafts:
+
+```php
+[
+    'data' => [
+        [
+            'url' => 'https://github.com/acme/backend/pull/42',
+            'number' => 42,
+            'title' => 'Fix checkout',
+            'state' => 'open',
+            'draft' => false,
+            'waiting_for_review' => true,
+            'created_at' => '2026-10-20T12:00:00Z',
+            'updated_at' => '2026-10-21T12:00:00Z',
+        ],
+    ],
+    'next_page' => null,
+]
+```
+
+`waiting_for_review` indicates that GitHub lists requested reviewers or teams; it does not mean the PR has no approvals. Timestamps are returned as supplied by GitHub. Filtering drafts is your application's responsibility.
+
+Results are ordered by least recently updated first, with up to 100 PRs per page. Pass `next_page` to the next call until it is `null`. This listing uses the repository pull request endpoint, so the search API's 1,000-result limit does not apply and there is no `incomplete` field. The additional metadata is specific to `openPullRequests()`; search and individual lookup fields remain unchanged.
 
 ### Search by Title
 
@@ -222,7 +299,7 @@ Cache durations are in seconds. The user agent and GitHub API version can be cha
 The package uses Laravel's default cache store:
 
 * Repository lists are cached for five minutes.
-* Pull request searches and details are cached for one minute.
+* Pull request searches, details and open pull request pages are cached for one minute.
 * Installation tokens are cached until one minute before expiry.
 
 Cache keys are scoped to the connection settings. Use a protected cache backend because installation tokens are sensitive.
@@ -237,8 +314,8 @@ The package throws exceptions and lets your application decide how to present th
 
 ```php
 use Egough\LaravelGitHub\Facades\GitHub;
-use Egough\LaravelGitHub\GitHubUnavailable;
-use Egough\LaravelGitHub\RepositoryUnavailable;
+use Egough\LaravelGitHub\Exceptions\GitHubUnavailable;
+use Egough\LaravelGitHub\Exceptions\RepositoryUnavailable;
 
 try {
     $pull = GitHub::pullRequest('acme/backend', 42);
@@ -252,6 +329,12 @@ try {
 Upstream response bodies are not included in exception messages. A missing individual pull request returns `null` rather than throwing `RepositoryUnavailable`.
 
 Your application is responsible for input validation, authorization and endpoint throttling. For browsing endpoints, validate `owner/repository` input, positive PR numbers, bounded search strings and search pages from 1 to 34.
+
+### Exception Migration
+
+From **v1.0.4**, use `Egough\LaravelGitHub\Exceptions\GitHubUnavailable` and `Egough\LaravelGitHub\Exceptions\RepositoryUnavailable`. The previous root-level names remain supported through Composer-loaded aliases during v1.x, without runtime deprecation warnings. **Those aliases will be removed in v2.0.0.** Update imports, fully qualified references, PHPDoc types and class strings before upgrading; catch blocks using the imported short names can stay unchanged.
+
+Exceptions also expose named factories such as `GitHubUnavailable::notConfigured()`, `RepositoryUnavailable::notAccessible()`, `InvalidPage::mustBePositive()` and `MissingRepository::required()`. Each returns an exception instance to throw; standard constructors remain available. See [the exception factory reference](docs.md#exception-factory-methods) for all factories.
 
 ---
 
@@ -288,8 +371,9 @@ To use a local checkout, add a path repository to the consuming application's `c
             "url": "../packages/laravel-github",
             "options": {
                 "symlink": true,
+                "reference": "config",
                 "versions": {
-                    "egough/laravel-github": "^1.0.0"
+                    "egough/laravel-github": "1.0.4"
                 }
             }
         }
@@ -298,10 +382,10 @@ To use a local checkout, add a path repository to the consuming application's `c
 ```
 
 ```bash
-composer require egough/laravel-github:^1.0.0
+composer require egough/laravel-github:^1.0.4
 ```
 
-PHP source changes are immediately available through the symlink. Rerun Composer when package metadata or dependencies change.
+The version override is a concrete version (`1.0.4`), rather than a constraint. PHP source changes are immediately available through the symlink. The `reference: config` setting lets Composer detect manifest changes before a commit. Run `composer update egough/laravel-github` when package metadata or dependencies change, including the exception alias autoload registration.
 
 The path must exist wherever the consuming application installs dependencies. Replace the local path dependency with a published release or a reachable Git repository before using it in CI or deployment.
 
